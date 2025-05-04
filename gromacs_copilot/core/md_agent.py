@@ -21,9 +21,9 @@ from gromacs_copilot.config import SYSTEM_MESSAGE_ADVISOR, SYSTEM_MESSAGE_AGENT
 class MDLLMAgent:
     """LLM-based agent for running molecular dynamics simulations with GROMACS"""
     
-    def __init__(self, api_key: str = None, model: str = "gpt-4o", 
+    def __init__(self, api_key: str = None, model: str = "qwen3:32b", 
                 workspace: str = "./md_workspace", 
-                url: str = "https://api.openai.com/v1/chat/completions", mode: str = "copilot", gmx_bin: str = "gmx"):
+                url: str = "http://localhost:11434/v1/chat/completions", mode: str = "copilot", gmx_bin: str = "gmx"):
         """
         Initialize the MD LLM agent
         
@@ -34,9 +34,25 @@ class MDLLMAgent:
             url: URL of the LLM API endpoint
         """
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        # 处理特殊情况，当api_key是'~'或空字符串时设置为None
+        if self.api_key in ['~', '']:
+            self.api_key = None
+            
         self.url = url
-        if not self.api_key:
-            raise ValueError("API key is required. Provide as parameter or set OPENAI_API_KEY environment variable")
+        self.original_url = url  # Store original URL for fallback
+        self.original_model = model  # Store original model for fallback
+        
+        # 检查是否是本地URL
+        is_local_url = "localhost" in url or "127.0.0.1" in url
+        
+        # For local ollama model, api_key is not required
+        if not is_local_url and not self.api_key:
+            raise ValueError("API key is required for non-local models. Provide as parameter or set OPENAI_API_KEY environment variable")
+            
+        # Set timeout and retry parameters for API requests
+        self.request_timeout = 60  # 增加超时时间以适应较慢的网络连接
+        self.max_retries = 3  # 最大重试次数
+        self.retry_delay = 2  # 重试间隔（秒）
         
         self.model = model
         self.conversation_history = []
@@ -48,6 +64,38 @@ class MDLLMAgent:
         self.mode = mode
         
         logging.info(f"MD LLM Agent initialized with model: {model}")
+        
+    def _handle_api_error(self, error):
+        """
+        Handle API connection errors by falling back to local ollama model
+        
+        Args:
+            error: Exception object from failed API request
+        """
+        if isinstance(error, (requests.exceptions.ConnectTimeout, 
+                            requests.exceptions.ConnectionError)):
+            # 提供更详细的错误信息
+            error_message = str(error)
+            logging.warning(f"API 连接失败: {error_message}")
+            
+            # 检查是否已经是本地Ollama模型
+            if "localhost" in self.url or "127.0.0.1" in self.url:
+                # 如果已经是本地Ollama，提供更具体的错误处理建议
+                logging.error("无法连接到本地Ollama服务。请确保Ollama服务正在运行。")
+                logging.info("可以通过运行 'ollama serve' 命令启动Ollama服务。")
+                logging.info("如果Ollama服务已在运行，可能是由于网络延迟或服务负载过高导致超时。")
+                # 仍然抛出异常，因为没有备用选项
+                raise error
+            else:
+                # 如果不是本地Ollama，尝试回退到本地Ollama
+                logging.warning(f"尝试回退到本地Ollama模型")
+                self.url = "http://localhost:11434/v1/chat/completions"
+                self.model = "qwen3:32b"
+                logging.info(f"已切换到本地Ollama模型: {self.url}")
+        else:
+            # 其他类型的错误
+            logging.error(f"API错误: {str(error)}")
+            raise error
 
     def switch_to_mmpbsa_protocol(self) -> Dict[str, Any]:
         """
@@ -638,10 +686,13 @@ class MDLLMAgent:
         """
         tools = tools or self.get_tool_schema()
         
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        # 设置请求头，对于本地ollama模型不需要API密钥
+        headers = {"Content-Type": "application/json"}
+        # 检查是否是本地URL
+        is_local_url = "localhost" in self.url or "127.0.0.1" in self.url
+        # 只有在非本地URL且有API密钥的情况下添加Authorization头
+        if not is_local_url and self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         
         data = {
             "model": self.model,
@@ -649,17 +700,58 @@ class MDLLMAgent:
             "tools": tools
         }
         
-        response = requests.post(
-            self.url,
-            headers=headers,
-            json=data
-        )
+        # 实现重试机制
+        retries = 0
+        while retries <= self.max_retries:
+            try:
+                # 如果是重试，记录日志
+                if retries > 0:
+                    wait_time = self.retry_delay * retries
+                    logging.info(f"重试连接 LLM API (尝试 {retries}/{self.max_retries})，等待 {wait_time} 秒...")
+                    import time
+                    time.sleep(wait_time)
+                
+                response = requests.post(
+                    self.url,
+                    headers=headers,
+                    json=data,
+                    timeout=self.request_timeout
+                )
+                
+                if response.status_code != 200:
+                    error_msg = f"LLM API 错误: {response.status_code} - {response.text}"
+                    logging.error(error_msg)
+                    
+                    # 如果达到最大重试次数，尝试回退到本地ollama模型
+                    if retries == self.max_retries:
+                        if self.model != "qwen3:32b" or self.url != "http://localhost:11434/v1/chat/completions":
+                            self._handle_api_error(Exception(error_msg))
+                            # 重置重试计数并使用新的模型和URL重新调用
+                            return self.call_llm(messages, tools)
+                        else:
+                            raise Exception(error_msg)
+                    retries += 1
+                    continue
+                
+                return response.json()
+                
+            except (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError) as e:
+                logging.warning(f"连接错误: {str(e)}")
+                
+                # 如果达到最大重试次数，尝试回退到本地ollama模型
+                if retries == self.max_retries:
+                    self._handle_api_error(e)
+                    # 重置重试计数并使用新的模型和URL重新调用
+                    return self.call_llm(messages, tools)
+                
+                retries += 1
+                continue
+            except Exception as e:
+                logging.error(f"调用 LLM API 时出错: {str(e)}")
+                raise
         
-        if response.status_code != 200:
-            logging.error(f"LLM API error: {response.status_code} - {response.text}")
-            raise Exception(f"LLM API error: {response.status_code} - {response.text}")
-        
-        return response.json()
+        # 如果所有重试都失败
+        raise Exception("调用 LLM API 时达到最大重试次数")
 
     def execute_tool_call(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
         """
