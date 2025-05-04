@@ -1,7 +1,7 @@
 
 ## The local LLM (Qwen3:32B) is now supported.
 
-Now you can use Ollama(qwen3:32b) to control GROMACS!
+Now you can use Ollama (qwen3:32b recommended) to control GROMACS!
 
 This project is modified from the original source code, with assistance from Claude-3.7-Sonnet. 
 
