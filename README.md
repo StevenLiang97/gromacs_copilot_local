@@ -4,6 +4,23 @@
 The good news: 🎉 You now have more time to hang out with your cat! 🐱💖  
 The bad news: 😢 You'll miss out on GROMACS' legendary wisdom... 🧙‍♂️💬
 
+
+## The local LLM (Qwen3:32B) is now supported.
+
+Now you can use Ollama(qwen3:32b) to control GROMACS!
+
+This project is modified from the original source code, with assistance from Claude-3.7-Sonnet. 
+
+A new "--time out" option has been added, which can be adjusted based on the response time of the local Ollama model (in seconds).
+
+!!! Please make sure that Ollama is running. 
+
+!!! The "exit" command will also stop the local Ollama model, and you will need to restart Ollama before starting a new project.
+
+```bash
+ollama run qwen3:32b
+```
+
 ## Introduction  
 This agent automates **MD simulations** for proteins in water using **GROMACS**. It sets up the system, runs simulations, and analyzes **RMSD, RMSF, Rg, H-bonds**, etc.  
 
@@ -73,6 +90,17 @@ gmx_copilot --workspace md_workspace/ \
 --model gemini-2.0-flash \
 --url https://generativelanguage.googleapis.com/v1beta/chat/completions
 ```
+
+### Using Ollama
+```bash
+gmx_copilot --workspace md_workspace/
+--prompt "setup simulation system for 1pga_protein.pdb in the workspace" \
+--api-key ~ \
+--model qwen3:32b \
+--url http://localhost:11434/v1/chat/completions \
+--timeout 120
+```
+
 
 3. Agent mode
 The agent mode is good automation of a long acting trajectory of using tools.
